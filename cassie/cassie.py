@@ -1,5 +1,6 @@
 # Consolidated Cassie environment.
 
+import json
 from .cassiemujoco import pd_in_t, state_out_t, CassieSim, CassieVis
 
 from .trajectory import CassieTrajectory, getAllTrajectories
@@ -315,10 +316,12 @@ class CassieEnv_v2:
         if reward < 0.3:
             done = True
 
+        state, state_dict = self.get_full_state()
+
         if return_omniscient_state:
-            return self.get_full_state(), self.get_omniscient_state(), reward, done, {}
+            return state, self.get_omniscient_state(), reward, done, state_dict
         else:
-            return self.get_full_state(), reward, done, {}
+            return state, reward, done, state_dict,
 
     def reset(self):
 
@@ -392,7 +395,9 @@ class CassieEnv_v2:
             self.joint_offsets[4] = self.joint_offsets[12]
             self.joint_offsets[9] = self.joint_offsets[15]
 
-        return self.get_full_state()
+        state, state_dict = self.get_full_state()
+
+        return state
 
     def reset_for_test(self, full_reset=False):
         self.phase = 0
@@ -434,7 +439,9 @@ class CassieEnv_v2:
         if self.slope_rand:
             self.sim.set_geom_quat(np.array([1, 0, 0, 0]), "floor")
 
-        return self.get_full_state()
+        state, state_dict = self.get_full_state()
+
+        return state
 
     def reset_cassie_state(self):
         # Only reset parts of cassie_state that is used in get_full_state
@@ -482,6 +489,46 @@ class CassieEnv_v2:
             return old_speed_reward(self)
         else:
             raise NotImplementedError
+
+    def initial_by_given_state(self, init_state):
+        self.phase = 0
+        self.time = 0
+        self.counter = 0
+        self.orient_add = 0
+        self.orient_time = np.inf
+        self.y_offset = 0
+        self.phase_add = 1
+
+        self.state_history = [np.zeros(self._obs) for _ in range(self.history+1)]
+
+        qpos = np.array(init_state["qpos"])
+        qvel = np.array(init_state["qvel"])
+
+        self.update_speed(init_state["speed"])
+
+        # qpos, qvel = self.get_ref_state(self.phase)
+
+        # with open("./reset_trajectory.json", "w") as f:
+        #     json.dump({"qpos":qpos.tolist(),"qvel":qvel.tolist()},f, indent=4)
+
+        # print(qpos,qvel)
+
+        self.sim.set_qpos(qpos)
+        self.sim.set_qvel(qvel)
+        self.cassie_state = self.sim.step_pd(self.u)
+
+        if self.dynamics_randomization:
+            self.sim.set_dof_damping(self.default_damping)
+            self.sim.set_body_mass(self.default_mass)
+            self.sim.set_geom_friction(self.default_fric)
+            self.sim.set_const()
+
+        if self.slope_rand:
+            self.sim.set_geom_quat(np.array([1, 0, 0, 0]), "floor")
+
+        state, state_dict = self.get_full_state()      
+
+        return state, state_dict
 
   # get the corresponding state from the reference trajectory for the current phase
     def get_ref_state(self, phase=None):
@@ -598,15 +645,34 @@ class CassieEnv_v2:
             self.cassie_state.joint.velocity[:]                                      # unactuated joint velocities
         ])
 
+        state_dict = None
+
         if self.state_est:
             state = np.concatenate([robot_state, ext_state])
+            if self.clock_based:
+                state_dict = {  "timestamp":self.time,
+                                "robot_state":
+                                {"pelvis_height": self.cassie_state.pelvis.position[2] - self.cassie_state.terrain.height,
+                                "pelvis_orient": new_orient,
+                                "motor_pos": motor_pos,
+                                "pelvis_linear_vel":new_translationalVelocity,
+                                "pelvis angluar_vel":self.cassie_state.pelvis.rotationalVelocity[:],
+                                "motor_vel":self.cassie_state.motor.velocity[:],
+                                "pelvis_linear_vel_acc":new_translationalAcceleleration,
+                                "unactuated_joint_pos": joint_pos,
+                                "unactuated_joint_vel":self.cassie_state.joint.velocity[:]},
+                                "ext_state":
+                                    {"clock":clock,
+                                    "speed":self.speed
+                                    }
+                                }
         else:
             state = np.concatenate([qpos[self.pos_index], qvel[self.vel_index], ext_state])
 
         self.state_history.insert(0, state)
         self.state_history = self.state_history[:self.history+1]
 
-        return np.concatenate(self.state_history)
+        return np.concatenate(self.state_history), state_dict
 
     def render(self):
         if self.vis is None:
